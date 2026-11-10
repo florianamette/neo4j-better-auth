@@ -12,7 +12,9 @@ const driver = neo4j.driver(
 );
 
 export const auth = betterAuth({
-	secret: process.env.BETTER_AUTH_SECRET ?? "dev-only-secret-32-chars-minimum",
+	// No fallback on purpose: Better Auth uses a throwaway secret in development and
+	// refuses to start in production without BETTER_AUTH_SECRET.
+	secret: process.env.BETTER_AUTH_SECRET,
 	baseURL: process.env.BETTER_AUTH_URL ?? "http://localhost:3000",
 	database: neo4jAdapter({
 		driver,

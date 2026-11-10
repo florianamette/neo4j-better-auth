@@ -1,90 +1,83 @@
 import neo4j, { type Node, type Relationship } from "neo4j-driver";
 
-function normalizeValue(v: unknown): unknown {
-	if (neo4j.isInt(v)) {
-		const n = v.toNumber();
-		if (!Number.isSafeInteger(n)) return v.toString();
-		return n;
-	}
-	if (Array.isArray(v)) return v.map(normalizeValue);
-	if (neo4j.isNode(v)) return nodeToPlain(v);
-	if (neo4j.isRelationship(v)) return relToPlain(v);
+type PlainRecord = Record<string, unknown>;
+
+function integerToPlain(v: { toNumber(): number; toString(): string }): number | string {
+	const n = v.toNumber();
+	return Number.isSafeInteger(n) ? n : v.toString();
+}
+
+function bigintToPlain(v: bigint): number | string {
+	const n = Number(v);
+	return Number.isSafeInteger(n) ? n : v.toString();
+}
+
+function isTemporal(v: unknown): v is { toStandardDate(): Date } {
+	return neo4j.isDateTime(v) || neo4j.isLocalDateTime(v) || neo4j.isDate(v);
+}
+
+/** Convert a value read from the driver into plain JavaScript values. */
+function toPlainValue(v: unknown): unknown {
+	if (neo4j.isInt(v)) return integerToPlain(v);
+	if (typeof v === "bigint") return bigintToPlain(v);
+	if (Array.isArray(v)) return v.map(toPlainValue);
+	if (neo4j.isNode(v) || neo4j.isRelationship(v)) return propertiesToPlain(v);
 	if (v instanceof Date) return v;
-	if (neo4j.isDateTime(v) || neo4j.isLocalDateTime(v) || neo4j.isDate(v)) {
-		return v.toStandardDate();
-	}
-	if (v !== null && typeof v === "object") {
-		const o = v as Record<string, unknown>;
-		const out: Record<string, unknown> = {};
-		for (const [k, val] of Object.entries(o)) {
-			out[k] = normalizeValue(val);
-		}
-		return out;
-	}
+	if (isTemporal(v)) return v.toStandardDate();
+	if (v !== null && typeof v === "object") return mapValues(v as PlainRecord, toPlainValue);
 	return v;
 }
 
-export function nodeToPlain(node: Node): Record<string, unknown> {
-	const props: Record<string, unknown> = {};
-	for (const [k, val] of Object.entries(node.properties)) {
-		props[k] = normalizeValue(val);
-	}
-	return props;
-}
-
-function relToPlain(rel: Relationship): Record<string, unknown> {
-	const props: Record<string, unknown> = {};
-	for (const [k, val] of Object.entries(rel.properties)) {
-		props[k] = normalizeValue(val);
-	}
-	return props;
-}
-
-/**
- * Neo4j node properties must be primitives or arrays of primitives (no nested maps).
- * Objects are JSON-stringified; Better Auth is configured with supportsJSON: false for parsing.
- */
-export function propsForNeo4j(data: Record<string, unknown>): Record<string, unknown> {
-	const out: Record<string, unknown> = {};
-	for (const [k, v] of Object.entries(data)) {
-		if (v === undefined) continue;
-		out[k] = serializeNeo4jPropertyValue(v);
+function mapValues(
+	record: PlainRecord,
+	fn: (value: unknown) => unknown,
+): PlainRecord {
+	const out: PlainRecord = {};
+	for (const [key, value] of Object.entries(record)) {
+		out[key] = fn(value);
 	}
 	return out;
 }
 
-function serializeNeo4jPropertyValue(v: unknown): unknown {
+export function propertiesToPlain(entity: Node | Relationship): PlainRecord {
+	return mapValues(entity.properties as PlainRecord, toPlainValue);
+}
+
+/** Narrow an arbitrary query result value to a driver Node. */
+export function asNode(value: unknown): Node | null {
+	return neo4j.isNode(value) ? value : null;
+}
+
+/** Counts come back as driver Integers (or bigint); normalise to a JS number. */
+export function toCount(value: unknown): number {
+	if (neo4j.isInt(value)) return value.toNumber();
+	if (typeof value === "bigint") return Number(value);
+	return Number(value ?? 0);
+}
+
+/**
+ * Neo4j node properties must be primitives or arrays of primitives (no nested maps).
+ * Dates are stored as ISO strings and objects are JSON-stringified; Better Auth is
+ * configured with supportsJSON/supportsDates: false so it parses them back.
+ */
+export function toNeo4jPropertyValue(v: unknown): unknown {
 	if (v === null) return null;
-	if (neo4j.isInt(v)) {
-		const n = v.toNumber();
-		return Number.isSafeInteger(n) ? n : v.toString();
-	}
-	if (typeof v === "string" || typeof v === "number" || typeof v === "boolean")
-		return v;
+	if (neo4j.isInt(v)) return integerToPlain(v);
+	if (typeof v === "bigint") return bigintToPlain(v);
+	if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return v;
 	if (v instanceof Date) return v.toISOString();
-	if (Array.isArray(v)) {
-		return v.map((x) => serializeNeo4jPropertyValue(x));
-	}
-	if (v instanceof Map) {
-		return JSON.stringify(Object.fromEntries(v));
-	}
-	if (typeof v === "object") {
-		return JSON.stringify(v);
-	}
+	if (Array.isArray(v)) return v.map(toNeo4jPropertyValue);
+	if (v instanceof Map) return JSON.stringify(Object.fromEntries(v));
+	if (typeof v === "object") return JSON.stringify(v);
 	return String(v);
 }
 
-/** Last-resort coercion for driver parameters (avoids nested Map{} rejection). */
-export function asNeo4jParameterValue(v: unknown): unknown {
-	if (v === null) return null;
-	if (neo4j.isInt(v)) {
-		const n = v.toNumber();
-		return Number.isSafeInteger(n) ? n : v.toString();
+/** Serialize a row for storage, dropping undefined values. */
+export function toNeo4jProperties(data: PlainRecord): PlainRecord {
+	const out: PlainRecord = {};
+	for (const [key, value] of Object.entries(data)) {
+		if (value === undefined) continue;
+		out[key] = toNeo4jPropertyValue(value);
 	}
-	if (typeof v === "string" || typeof v === "number" || typeof v === "boolean")
-		return v;
-	if (v instanceof Date) return v.toISOString();
-	if (Array.isArray(v)) return v.map((x) => asNeo4jParameterValue(x));
-	if (typeof v === "object") return JSON.stringify(v);
-	return String(v);
+	return out;
 }

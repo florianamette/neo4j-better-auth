@@ -67,12 +67,13 @@ Reference fields (`references`) create and maintain directional edges:
 - example: child label `Session` -> edge type `HAS_SESSION`
 - edge wiring occurs on create and on update when referenced FK fields change
 
-### Cascade-like deletion behavior
+### Cascade deletion behavior
 
-The adapter includes targeted cleanup behavior:
+Neo4j has no foreign keys, so the adapter applies the cascades declared in the Better Auth schema itself:
 
-- deleting `user`: deletes cascade child nodes that reference user with `onDelete: cascade`
-- deleting `session` or `account`: removes incoming `HAS_*` edges before node deletion
+- deleting nodes of any model first deletes child nodes whose reference field declares `onDelete: "cascade"` towards it (for example `session` and `account` when a `user` is deleted)
+- cascades are applied depth first through nested references; cyclic references are deleted one level deep
+- nodes are removed with `DETACH DELETE`, which also drops their `HAS_*` edges
 
 ## Configuration
 
@@ -127,7 +128,7 @@ This section describes operational behavior implemented by the adapter.
 ### `create`
 
 - converts input data into Neo4j-compatible properties
-- creates node with model label
+- creates node with model label (`SET n = $props`)
 - normalizes optional-returned-null fields
 - resolves child `id` and creates FK-driven `HAS_*` edges
 - returns plain object representation of created node
@@ -147,8 +148,7 @@ This section describes operational behavior implemented by the adapter.
 
 ### `delete`
 
-- for `user`: performs cascade child deletion first
-- for `session` and `account`: removes incoming `HAS_*` edges first
+- deletes cascade children declared in the schema first (see "Cascade deletion behavior")
 - performs `DETACH DELETE` for matched node(s)
 
 ### `deleteMany`
@@ -243,7 +243,7 @@ Generates per-model statements:
 - unique constraints for fields marked `unique`
 - indexes for fields marked `index`
 
-Constraints/indexes use `IF NOT EXISTS` and sanitized names.
+Constraints/indexes use `IF NOT EXISTS`; names and identifiers are sanitized and backtick-quoted.
 
 ### `runCypherMigration(...)`
 
