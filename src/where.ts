@@ -1,75 +1,96 @@
 import type { CleanedWhere } from "better-auth/adapters";
-import Cypher, { in as opIn } from "@neo4j/cypher-builder";
-import type { Predicate } from "@neo4j/cypher-builder";
+import Cypher, { in as cypherIn } from "@neo4j/cypher-builder";
+import type { Expr, Predicate } from "@neo4j/cypher-builder";
 
+type Operator = CleanedWhere["operator"];
+
+/**
+ * Build a Cypher WHERE predicate from Better Auth's cleaned where clauses.
+ * Field names are checked against the model's known properties so a caller cannot
+ * filter on arbitrary property names; values always become query parameters.
+ */
 export function buildWherePredicate(
-	n: Cypher.NamedNode,
+	node: Cypher.NamedNode,
 	where: CleanedWhere[] | undefined,
-	allowedFields?: ReadonlySet<string>,
-): { predicate?: Predicate; params: Record<string, unknown> } {
-	if (!where?.length) return { params: {} };
-	if (allowedFields) {
-		for (const w of where) {
-			if (!allowedFields.has(w.field)) {
-				throw new Error(`neo4jAdapter: invalid where field "${w.field}"`);
-			}
-		}
-	}
-	const params: Record<string, unknown> = {};
-	let i = 0;
-	const param = (val: unknown) => {
-		const key = `w${i++}`;
-		params[key] = val;
-		return new Cypher.NamedParam(key, val);
-	};
-
-	const buildExpr = (w: CleanedWhere): Predicate => {
-		const prop = n.property(w.field);
-		const v = w.value;
-		switch (w.operator) {
-			case "eq":
-				return v === null
-					? Cypher.isNull(prop)
-					: (Cypher.eq(prop, param(v)) as Predicate);
-			case "ne":
-				return v === null
-					? Cypher.isNotNull(prop)
-					: (Cypher.neq(prop, param(v)) as Predicate);
-			case "lt":
-				return Cypher.lt(prop, param(v)) as Predicate;
-			case "lte":
-				return Cypher.lte(prop, param(v)) as Predicate;
-			case "gt":
-				return Cypher.gt(prop, param(v)) as Predicate;
-			case "gte":
-				return Cypher.gte(prop, param(v)) as Predicate;
-			case "in":
-				return opIn(prop, param(v)) as Predicate;
-			case "not_in":
-				return Cypher.not(opIn(prop, param(v)) as Predicate);
-			case "contains":
-				return Cypher.contains(prop, param(String(v))) as Predicate;
-			case "starts_with":
-				return Cypher.startsWith(prop, param(String(v))) as Predicate;
-			case "ends_with":
-				return Cypher.endsWith(prop, param(String(v))) as Predicate;
-			default:
-				return v === null
-					? Cypher.isNull(prop)
-					: (Cypher.eq(prop, param(v)) as Predicate);
-		}
-	};
-
-	let acc = buildExpr(where[0]!) as Predicate;
-	for (let j = 1; j < where.length; j++) {
-		const w = where[j]!;
-		const next = buildExpr(w);
-		const connector = w.connector ?? "AND";
-		acc =
-			connector === "OR"
-				? (Cypher.or(acc, next) as Predicate)
-				: (Cypher.and(acc, next) as Predicate);
+	allowedFields: ReadonlySet<string>,
+): Predicate | undefined {
+	if (!where?.length) return undefined;
+	for (const clause of where) {
+		assertAllowedField(clause.field, allowedFields);
 	}
 
-	return { predicate: acc, params };
+	const [first, ...rest] = where;
+	let predicate = clausePredicate(node, first!);
+	for (const clause of rest) {
+		const next = clausePredicate(node, clause);
+		predicate =
+			clause.connector === "OR"
+				? Cypher.or(predicate, next)
+				: Cypher.and(predicate, next);
+	}
+	return predicate;
+}
+
+function assertAllowedField(field: string, allowedFields: ReadonlySet<string>): void {
+	if (!allowedFields.has(field)) {
+		throw new Error(`neo4jAdapter: invalid where field "${field}"`);
+	}
+}
+
+function clausePredicate(node: Cypher.NamedNode, clause: CleanedWhere): Predicate {
+	const operator: Operator = clause.operator ?? "eq";
+	const prop = node.property(clause.field);
+	// `mode: "insensitive"` only applies to string equality and pattern matching.
+	const insensitiveValue =
+		clause.mode === "insensitive" && isStringValue(clause.value)
+			? lowerCase(clause.value)
+			: undefined;
+	const insensitive = insensitiveValue !== undefined;
+	const lhs: Expr = insensitive ? Cypher.toLower(prop) : prop;
+	const value = insensitive ? insensitiveValue : clause.value;
+
+	switch (operator) {
+		case "eq":
+			return value === null ? Cypher.isNull(prop) : Cypher.eq(lhs, param(value));
+		case "ne":
+			return value === null ? Cypher.isNotNull(prop) : Cypher.neq(lhs, param(value));
+		case "lt":
+			return Cypher.lt(prop, param(value));
+		case "lte":
+			return Cypher.lte(prop, param(value));
+		case "gt":
+			return Cypher.gt(prop, param(value));
+		case "gte":
+			return Cypher.gte(prop, param(value));
+		case "in":
+			return cypherIn(lhs, param(asList(value)));
+		case "not_in":
+			return Cypher.not(cypherIn(lhs, param(asList(value))));
+		case "contains":
+			return Cypher.contains(lhs, param(String(value)));
+		case "starts_with":
+			return Cypher.startsWith(lhs, param(String(value)));
+		case "ends_with":
+			return Cypher.endsWith(lhs, param(String(value)));
+		default:
+			throw new Error(`neo4jAdapter: unsupported where operator "${String(operator)}"`);
+	}
+}
+
+function param(value: unknown): Cypher.Param {
+	return new Cypher.Param(value);
+}
+
+function asList(value: unknown): unknown[] {
+	return Array.isArray(value) ? value : [value];
+}
+
+function isStringValue(value: unknown): value is string | string[] {
+	return Array.isArray(value)
+		? value.every((v) => typeof v === "string")
+		: typeof value === "string";
+}
+
+function lowerCase(value: string | string[]): string | string[] {
+	return Array.isArray(value) ? value.map((v) => v.toLowerCase()) : value.toLowerCase();
 }
