@@ -43,14 +43,15 @@ jobs:
       - name: Build
         run: pnpm run build
 
+      # v2 is the line compatible with @changesets/cli 3: v1 parsed the v2 CLI's
+      # "New tag:" output and silently skipped tags and GitHub releases with v3.
       - name: Create release PR or publish
-        uses: changesets/action@6a0a831ff30acef54f2c6aa1cbbc1096b066edaf # v1.7.0
+        uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
         with:
-          version: pnpm changeset version
-          publish: pnpm changeset publish
-          commit: "chore: version packages"
-          title: "chore: version packages"
+          version-script: pnpm changeset version
+          publish-script: pnpm changeset publish
+          commit-message: "chore: version packages"
+          pr-title: "chore: version packages"
           github-token: ${{ secrets.CHANGESET_RELEASE_PAT || github.token }}
         env:
-          GITHUB_TOKEN: ${{ secrets.CHANGESET_RELEASE_PAT || github.token }}
           NPM_CONFIG_PROVENANCE: "true"
