@@ -5,10 +5,26 @@
 ```bash
 pnpm install --frozen-lockfile
 pnpm run build
-pnpm test
+pnpm test               # everything
+pnpm test:unit          # fast, no database
+pnpm test:integration   # against Neo4j (Docker required)
 ```
 
-Tests spin up Neo4j via **Testcontainers** (Docker required), similar to GitHub Actions.
+### Test layout
+
+```
+test/
+  unit/          pure functions (where builder, migrations, record conversion, …); no database
+  integration/   real Neo4j via Testcontainers
+    better-auth-suite.test.ts   Better Auth's official adapter conformance suite (@better-auth/test-utils)
+    adapter-operations.test.ts  Neo4j-specific behaviour: delete counts, consumeOne, edges, cascades
+    password-reset.test.ts      end-to-end Better Auth flows
+  helpers/       shared setup (container lifecycle, migrations, schema context)
+```
+
+Integration tests share **one** Neo4j container, started once by `test/helpers/neo4j-global-setup.ts`.
+Integration files run sequentially and each resets the graph in its own setup, so they never
+see each other's data.
 
 ## Continuous integration
 

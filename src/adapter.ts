@@ -221,9 +221,49 @@ function createOperations(runner: CypherRunner) {
 			lineage: ReadonlySet<string> = new Set(),
 		): Promise<number> {
 			await deleteCascadingChildren(run, model, where, lineage);
-			const { node, clause } = matchModel(model, where);
-			const result = await runClause(run, clause.detachDelete(node));
-			return result.summary.counters.updates().nodesDeleted ?? 0;
+			const { cypher, params } = matchModel(model, where).clause.build();
+			// Count from the returned record rather than `result.summary.counters`: the summary
+			// is not available in every runtime/driver setup (see issue #2).
+			const result = await run(`${cypher}\nDETACH DELETE n\nRETURN count(*) AS c`, params);
+			return toCount(result.records[0]?.get("c"));
+		}
+
+		/**
+		 * Atomically read and delete one matching row inside a single write transaction.
+		 * The delete is guarded by the row id plus the original predicate, so a concurrent
+		 * consumer that got there first makes this one resolve to `null`.
+		 */
+		async function consumeOneRow(
+			run: RunCypher,
+			model: string,
+			where: CleanedWhere[],
+		): Promise<Row | null> {
+			const row = await findOneRow(run, model, where);
+			if (!row) return null;
+			const idField = idProperty(schema, schemaKeyOf(model));
+			const id = row[idField];
+			if (typeof id !== "string" && typeof id !== "number") return null;
+			const byId: CleanedWhere = {
+				field: idField,
+				operator: "eq",
+				value: id,
+				connector: "AND",
+				mode: "sensitive",
+			};
+			// Appending an AND clause to an OR chain would change its meaning; the id alone
+			// still guards against a concurrent consumer deleting the row first.
+			const hasOr = where.some((clause) => clause.connector === "OR");
+			const guard = hasOr ? [byId] : [...where, byId];
+
+			// Take the node's write lock first (a no-op write), then re-read: a concurrent
+			// consumer holding the lock has committed by now, and the fresh read sees it.
+			// Without this, both transactions match the node and both "delete" it.
+			const { cypher, params } = matchModel(model, [byId]).clause.build();
+			await run(`${cypher}\nSET n.\`__consumeLock\` = true\nREMOVE n.\`__consumeLock\``, params);
+			if ((await countRows(run, model, guard)) !== 1) return null;
+
+			const deleted = await deleteNodes(run, model, guard);
+			return deleted === 1 ? row : null;
 		}
 
 		function describeFailure<T>(operation: string, work: Promise<T>): Promise<T> {
@@ -298,6 +338,14 @@ function createOperations(runner: CypherRunner) {
 				describeFailure(
 					"deleteMany",
 					runner.inWriteTransaction((run) => deleteNodes(run, model, where)),
+				),
+
+			consumeOne: <T>({ model, where }: { model: string; where: CleanedWhere[] }) =>
+				describeFailure(
+					"consumeOne",
+					runner.inWriteTransaction(
+						(run) => consumeOneRow(run, model, where) as Promise<T | null>,
+					),
 				),
 
 			findOne: <T>({ model, where, select }: { model: string; where: CleanedWhere[]; select?: string[] }) =>

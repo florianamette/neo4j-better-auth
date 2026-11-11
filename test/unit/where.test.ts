@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import Cypher from "@neo4j/cypher-builder";
 import type { CleanedWhere } from "better-auth/adapters";
-import { buildWherePredicate } from "../src/where.js";
+import { buildWherePredicate } from "../../src/where.js";
 
 const allowed = new Set(["id", "email", "age"]);
 
